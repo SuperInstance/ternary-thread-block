@@ -1,4 +1,6 @@
 [package]
+description = "ternary-thread-block - SuperInstance ecosystem crate"
+repository = "https://github.com/SuperInstance/ternary-thread-block"
 name = "ternary-thread-block"
 version = "0.1.0"
 edition = "2024"
