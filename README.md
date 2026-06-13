@@ -82,6 +82,20 @@ Thread block configuration optimizes ternary GPU kernel launches in **SuperInsta
 | NVIDIA. *CUDA C++ Programming Guide*, v12, 2024 — occupancy calculation.
 | Hennessy, John & Patterson, David. *Computer Architecture*, 6th ed., 2017.
 
+
+
+## Complexity Summary
+
+| Operation | Time | Notes |
+|---|---|---|
+| Block creation | O(1) | Struct construction |
+| validate(limits) | O(1) | Three comparisons |
+| total_threads() | O(1) | Three multiplications |
+| occupancy() | O(1) | Division + min |
+| Grid computation | O(1) | Ceiling division per dim |
+
+All operations are O(1), making it practical to exhaustively search the configuration space (block sizes 32-1024 in steps of 32) to find the optimal ternary kernel launch configuration.
+
 ## License
 
 MIT
