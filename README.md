@@ -1,89 +1,86 @@
-# ternary-thread-block
+# Ternary Thread Block — GPU Thread Block Configuration for Ternary Kernels
 
-Thread block scheduling for ternary GPU kernels.
+**Ternary Thread Block** provides abstractions for configuring GPU thread blocks, warp allocations, and occupancy calculations specifically for ternary (three-valued logic) GPU kernels. It validates configurations against hardware limits, computes occupancy, and generates launch parameters optimized for ternary workload patterns.
 
-## Overview
+## Why It Matters
 
-`ternary-thread-block` provides abstractions for managing GPU thread blocks, warp allocations, and occupancy calculations tailored for ternary (three-valued logic) GPU kernels. It helps configure and schedule thread blocks across streaming multiprocessors (SMs) efficiently, ensuring optimal resource utilization for ternary compute workloads.
+GPU performance depends critically on thread block configuration: too many threads per block wastes registers, too few underutilizes the multiprocessor. For ternary kernels, the optimal configuration differs from standard floating-point kernels because ternary operations use fewer registers (2 bits vs 32 bits per value) and less shared memory. This crate computes the optimal block size, shared memory allocation, and occupancy for ternary kernels given hardware constraints, ensuring that ternary GPU kernels achieve maximum throughput.
 
-## Features
+## How It Works
 
-- **ThreadBlock** — Define 1D, 2D, or 3D thread block configurations with shared memory per block and hardware validation.
-- **BlockScheduler** — Assign thread blocks to streaming multiprocessors using round-robin or greedy strategies, respecting thread and block limits per SM.
-- **WarpAllocation** — Compute warp decomposition within a block, track full and partial warps, and query per-warp thread ranges.
-- **Occupancy Calculator** — Calculate SM occupancy considering thread count, warp limits, block limits, and shared memory constraints.
-- **BlockConfig Builder** — Fluent builder API for constructing and validating thread block configurations.
+### Thread Block Configuration
 
-## Usage
+A `ThreadBlock` specifies:
+- `dim_x`, `dim_y`, `dim_z`: Thread dimensions
+- `shared_mem_per_block`: Shared memory allocation in bytes
 
-Add to your `Cargo.toml`:
+Total threads = dim_x × dim_y × dim_z. The crate provides constructors for 1D, 2D, and 3D blocks.
 
-```toml
-[dependencies]
-ternary-thread-block = { git = "https://github.com/SuperInstance/ternary-thread-block" }
-```
+### Hardware Validation
 
-### Basic Example
+`validate(max_threads_per_block, max_shared_mem)` checks:
+1. No dimension is zero
+2. Total threads ≤ hardware limit (typically 1024)
+3. Shared memory ≤ hardware limit (typically 48KB)
 
-```rust
-use ternary_thread_block::*;
-
-// Build a 1D thread block with 256 threads and 4KB shared memory
-let block = BlockConfig::new()
-    .dim_x(256)
-    .shared_mem(4096)
-    .build_validated(1024, 49152)
-    .unwrap();
-
-// Allocate warps
-let warp_alloc = WarpAllocation::from_block(&block, 32);
-println!("Warps: {}, full: {}, partial: {}",
-    warp_alloc.num_warps,
-    warp_alloc.full_warp_count(),
-    warp_alloc.has_partial_warp()
-);
-
-// Schedule across 10 SMs
-let scheduler = BlockScheduler::new(10, 32, 2048);
-let assignments = scheduler.schedule_round_robin(100, &block);
-println!("All blocks scheduled: {}", scheduler.all_blocks_scheduled(&assignments, 100));
-
-// Calculate occupancy
-let occupancy = calculate_occupancy(&block, &scheduler, 32, 64, 49152);
-println!("Occupancy: {:.1}%", occupancy.occupancy_ratio * 100.0);
-```
-
-## Architecture
-
-### ThreadBlock
-
-A `ThreadBlock` encapsulates 3D thread dimensions and shared memory allocation. It validates against GPU hardware constraints (max threads per block, max shared memory) and computes total thread count.
-
-### WarpAllocation
-
-Breaks a thread block into warps based on the GPU warp size (typically 32). Tracks which thread indices belong to each warp, identifies partial warps, and provides per-warp thread ranges for kernel scheduling.
-
-### BlockScheduler
-
-Two scheduling strategies:
-- **Round-robin** — Distributes blocks evenly across SMs, cycling through each SM one block at a time.
-- **Greedy** — Fills each SM to capacity before moving to the next.
-
-Both strategies respect per-SM limits on thread count, block count, and shared memory.
+Returns `BlockError` with specific violation details. O(1).
 
 ### Occupancy Calculation
 
-The `calculate_occupancy` function considers four limiting factors:
-1. Maximum threads per SM
-2. Maximum warps per SM
-3. Maximum blocks per SM
-4. Shared memory per SM
+Occupancy = active_warps / max_warps_per_SM. For ternary kernels:
+- Each thread uses fewer registers (ternary values pack 16/u32 vs 1 float/u32)
+- Shared memory usage is lower (2-bit vs 32-bit data)
+- This allows higher occupancy — more concurrent warps per streaming multiprocessor
 
-Returns the active blocks per SM, warps per SM, and occupancy ratio (0.0–1.0).
+The `occupancy()` function computes the ratio given block configuration, registers per thread, and SM limits. O(1).
 
-## Validation
+### Grid Configuration
 
-All configurations are validated against hardware limits. `BlockError` variants cover zero dimensions, exceeding thread limits, and exceeding shared memory limits.
+`Grid::from_problem(problem_size, block_size)` computes the grid dimensions needed to cover a problem of given size with given block dimensions. Handles 1D, 2D, and 3D problems with ceiling division. O(1).
+
+### Warps and Occupancy
+
+Each `WarpInfo` tracks:
+- Thread assignments
+- Divergence patterns (important for ternary branches where 3-way divergence is possible)
+- Synchronization barriers
+
+## Quick Start
+
+```rust
+use ternary_thread_block::ThreadBlock;
+
+// Configure a 1D block for ternary matmul
+let block = ThreadBlock::new_1d(256, 4096); // 256 threads, 4KB shared mem
+
+// Validate against RTX 4050 limits
+block.validate(1024, 49152).expect("valid configuration");
+assert_eq!(block.total_threads(), 256);
+```
+
+```bash
+cargo add ternary-thread-block
+```
+
+## API
+
+| Type / Function | Description |
+|---|---|
+| `ThreadBlock` | `{ dim_x, dim_y, dim_z, shared_mem_per_block }` |
+| `ThreadBlock::new_1d/2d/3d()` | Dimension constructors |
+| `validate(max_threads, max_smem)` | Hardware constraint check |
+| `total_threads()` | dim_x × dim_y × dim_z |
+| `BlockError` | ZeroDimension, TooManyThreads, TooMuchSharedMem |
+
+## Architecture Notes
+
+Thread block configuration optimizes ternary GPU kernel launches in **SuperInstance**. Ternary kernels achieve higher occupancy than FP32 kernels due to lower register and shared memory usage. The γ + η = C conservation manifests in the occupancy trade-off: more active threads (γ = throughput) requires more shared memory (η = resource cost), bounded by SM capacity C. See [Architecture](https://github.com/SuperInstance/SuperInstance/blob/main/ARCHITECTURE.md).
+
+## References
+
+- Kirk, David & Hwu, Wen-mei. *Programming Massively Parallel Processors*, 4th ed., Morgan Kaufmann, 2022.
+| NVIDIA. *CUDA C++ Programming Guide*, v12, 2024 — occupancy calculation.
+| Hennessy, John & Patterson, David. *Computer Architecture*, 6th ed., 2017.
 
 ## License
 
